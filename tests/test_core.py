@@ -1014,3 +1014,38 @@ class NotionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JunkFilterTests(unittest.TestCase):
+    """되묻기가 만드는 쓰레기를 코드로 거른다. 프롬프트로 금지하려던 시도는 실패했지만
+    (좋은 가이드가 47→30개로 같이 사라짐) 출력 검사는 라벨 82건에서 정밀도 100%였다."""
+
+    def junk(self, phrase, source=""):
+        return analyze.junk_reason({"phrase": phrase, "source_phrase": source})
+
+    def test_timestamp_as_source_is_rejected(self):
+        # 조인 프롬프트가 만든 실측 결함 — 추가분의 22%가 원문에 타임코드를 넣었다
+        self.assertIsNotNone(self.junk("top panel holes", "04:13"))
+        self.assertIsNotNone(self.junk("어떤 것", "9:17"))
+
+    def test_numeric_specs_are_rejected(self):
+        for phrase in ("50 grams", "4.5mm", "36 inches", "2 inches in width"):
+            self.assertIsNotNone(self.junk(phrase), phrase)
+
+    def test_frequency_and_effort_are_rejected(self):
+        # 규칙 10: 한 장의 정지 화면으로 확인할 수 없는 조언
+        for phrase in ("Every other day", "두 번 연속으로", "아주 천천히", "너무 강하게 치지 않고"):
+            self.assertIsNotNone(self.junk(phrase), phrase)
+
+    def test_real_guides_survive(self):
+        # 라벨 82건에서 오탐 0을 확인한 문구들 — 여기가 깨지면 진짜 가이드를 잃는다
+        for phrase in ("잘게 다진 마늘", "힙 너비", "어깨 높이", "windowpane test showing translucent dough",
+                       "소스와 면이 엉긴 상태", "무릎 바깥쪽", "금속 플러그 뾰족한 부분의 방향"):
+            self.assertIsNone(self.junk(phrase), phrase)
+
+    def test_drop_junk_reports_what_it_removed(self):
+        kept, dropped = analyze.drop_junk([
+            {"phrase": "잘게 다진 마늘"}, {"phrase": "50 grams"}, {"phrase": "아주 천천히"}])
+        self.assertEqual(["잘게 다진 마늘"], [g["phrase"] for g in kept])
+        self.assertEqual(2, len(dropped))
+        self.assertIn("50 grams", dropped[0])
