@@ -201,6 +201,52 @@ def _same_guide(a: dict, b: dict) -> bool:
     return len(first & second) / min(len(first), len(second)) >= MERGE_CONTAINMENT
 
 
+# 되묻기가 만드는 쓰레기를 코드로 거른다. 프롬프트로 금지하려던 시도는 실패했다 —
+# 금지 목록을 붙이니 진짜 가이드도 같이 사라지고(좋은 것 47→30개) 원문에 타임스탬프를
+# 넣는 새 결함까지 생겼다. 출력 검사는 결정적이고, 라벨 82건에 대고 재보니 네 규칙
+# 모두 정밀도 100%였다 (쓰레기 15개 제거, 진짜 가이드 손실 0).
+_JUNK_TIMESTAMP = re.compile(r"^\s*\d{1,2}:\d{2}\s*$")
+_UNIT = r"(?:mm|cm|inch(?:es)?|g|grams?|kg|oz|lbs?|%|밀리미터|센티|그램|킬로)"
+_JUNK_SPEC = re.compile(rf"[\d.]+\s*-?\s*{_UNIT}\b", re.IGNORECASE)
+_JUNK_FREQUENCY = re.compile(
+    r"(every\s+(other\s+)?day|매일|이틀에|번 연속|몇 번|번갈아|회 반복)", re.IGNORECASE)
+_JUNK_EFFORT = re.compile(
+    r"(천천히|빠르게|slowly|quickly|세게|강하게|too crazy|토크|힘을 주|힘 조절)",
+    re.IGNORECASE)
+
+
+def junk_reason(guide: dict) -> str | None:
+    """정지 화면으로 보여줄 수 없거나 텍스트로 이미 정확한 가이드면 사유를, 아니면 None.
+
+    규칙 10("한 장의 정지 화면으로 확인할 수 없는 조언은 만들지 않는다")을 사후에
+    강제하는 장치다. 판정이 결정적이라 재실행해도 같은 결과가 나온다.
+    """
+    phrase = guide.get("phrase") or ""
+    source = guide.get("source_phrase") or ""
+    both = f"{phrase} {source}"
+    if _JUNK_TIMESTAMP.match(source):
+        return f"원문이 타임스탬프({source.strip()}) — 영상에서 들리는 말이 아니다"
+    if _JUNK_SPEC.search(phrase) and len(phrase.split()) <= 4:
+        return f"수치·규격({phrase}) — 텍스트가 이미 정확해 사진이 더 알려줄 게 없다"
+    if _JUNK_FREQUENCY.search(both):
+        return "빈도·횟수 — 한 장의 정지 화면으로 보여줄 수 없다"
+    if _JUNK_EFFORT.search(both):
+        return "속도·힘 — 한 장의 정지 화면으로 보여줄 수 없다"
+    return None
+
+
+def drop_junk(guides: list) -> tuple[list, list]:
+    """(남길 가이드, 버린 사유 목록)."""
+    kept, dropped = [], []
+    for guide in guides:
+        reason = junk_reason(guide)
+        if reason:
+            dropped.append(f"{guide.get('phrase', '')}: {reason}")
+        else:
+            kept.append(guide)
+    return kept, dropped
+
+
 def renumber(guides: list) -> list:
     """id를 vg-1..vg-N으로 다시 매긴다. 자르고 나면 구멍이 생겨(vg-1, vg-4, vg-5)
     나중에 추가되는 가이드가 기존 id와 충돌한다 (리뷰 실측: 중복 id 계약 위반)."""
@@ -487,9 +533,17 @@ def main():
                 # 채운 뒤 상한을 다시 적용하지 않으면 계약을 우리가 깨고 전체 실행을 버린다
                 data["visual_guides"] = renumber(
                     trim_guides(data["visual_guides"], args.max_guides))
+            # 되묻기는 정지 화면으로 못 보여줄 것(속도·힘·횟수)이나 텍스트가 이미
+            # 정확한 것(수치·규격)까지 만들어낸다 — 라벨 82건 기준 43%가 그런 것이었다.
+            kept, junk = drop_junk(data["visual_guides"])
+            data["visual_guides"] = renumber(kept)
             print(f"  빈 단계 {gaps}개 중 {min(gaps, MAX_FILL_CALLS)}개를 다시 봐서 "
-                  f"가이드 {added}개 추가")
-            data["_gap_fill"] = {"empty_steps": gaps, "added": added}
+                  f"가이드 {added}개 추가"
+                  + (f", 그중 {len(junk)}개는 걸러냄" if junk else ""))
+            for reason in junk:
+                print(f"    걸러냄 — {reason}")
+            data["_gap_fill"] = {"empty_steps": gaps, "added": added,
+                                 "filtered": len(junk)}
         data["_duration"] = duration
         data["_asset_digest"] = asset_digest(args.profile)
         data["_profile"] = args.profile
