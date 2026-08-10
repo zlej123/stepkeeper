@@ -13,7 +13,7 @@ Two paths:
 
 Usage:
     py -3.11 pipeline.py URL [--profile generic] [--language ko] [--max-guides 5]
-        [--model gemini-flash-lite-latest] [--force]
+        [--model gemini-3.5-flash-lite] [--force]
         [--links-only] [--picks PATH]
         [--export bundle|obsidian|goodnotes|notion] [--destination DIR]
         [--parent PAGE_ID]   # required for --export notion
@@ -51,7 +51,7 @@ def main():
     ap.add_argument("--profile", default="generic")
     ap.add_argument("--language", default="ko")
     ap.add_argument("--max-guides", default="5")
-    ap.add_argument("--model", default="gemini-flash-lite-latest")
+    ap.add_argument("--model", default="gemini-3.5-flash-lite")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--links-only", action="store_true",
                     help="캡처 없이 타임스탬프 링크만으로 렌더 (완전 자동)")

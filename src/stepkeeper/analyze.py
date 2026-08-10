@@ -456,7 +456,7 @@ def normalize(data: dict) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
-    ap.add_argument("--model", default="gemini-flash-lite-latest")
+    ap.add_argument("--model", default="gemini-3.5-flash-lite")
     ap.add_argument("--profile", default="generic", help="분석 프로파일 (generic|recipe|...)")
     ap.add_argument(
         "--language",
