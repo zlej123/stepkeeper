@@ -29,12 +29,19 @@
    "result": "FAILED — no separation",
    "measured": "All five signals put the 4 failures inside the 10-90 percentile band of the 32 good frames, and the failures disagree with each other: #50 is the flattest frame in the set (edge 4.6, flat 0.94) while #60 is the busiest (edge 23.7).",
    "date": "2026-08-08"
+  },
+  {
+   "idea": "Separate verifier model — keep flash-lite for picking, verify the picked frame with the stronger gemini-3.5-flash (pinned)",
+   "result": "FAILED the pre-registered bar (catch >=2/4 with <=1/32 false rejections), though it is the least-bad attempt so far",
+   "measured": "Caught 1 of 4 failures (#22 supine butterfly); #11 putty knife, #50 clay bead and #60 wick trimmer still pass — the stronger model shares the same confident misreading on 3 of 4. False rejections: 0 of 32 human-approved frames (vs 24/32 for same-model voting). Operational blocker regardless: gemini-3.5-flash free tier is 20 requests/day, so second-model verification would cap a BYOK free-tier user at ~4 videos/day.",
+   "date": "2026-08-10"
   }
  ],
  "why_they_fail": {
   "common_shape": "Every attempt either re-asks the same model that just got it wrong, or measures the image without knowing what the image is supposed to contain.",
   "the_wall": "'Does this frame contain what the guide asks for?' is a semantic judgement. When the model is confidently wrong about it, neither re-prompting nor pixel statistics recovers the right answer. #60 proves the point: the subject fills the frame, it is just the wrong subject — no measure of 'how big is the thing' can see that.",
-  "not_one_phenomenon": "These were grouped as 'wide shots' but they are not one failure. #50 fails because the subject is tiny; #60 fails because the frame is full of the wrong object."
+  "not_one_phenomenon": "These were grouped as 'wide shots' but they are not one failure. #50 fails because the subject is tiny; #60 fails because the frame is full of the wrong object.",
+  "cross_model_note": "A stronger model is measurably better calibrated (0 false rejections) but still agrees with the wrong verdict on 3 of 4 — 'does this frame contain X' failures here are not a capability gap between tiers; both models read the same wrong thing into the frame."
  },
  "what_actually_worked_instead": [
   "Removing the prompt cap on guide count (coverage 43% -> 73% on long videos, 41% -> 66% overall for short)",
