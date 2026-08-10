@@ -139,7 +139,7 @@ def main():
     ap.add_argument("video_id")
     ap.add_argument("--profile", default="generic")
     ap.add_argument("--language", default="ko")
-    ap.add_argument("--model", default="gemini-flash-lite-latest")
+    ap.add_argument("--model", default="gemini-3.5-flash-lite")
     args = ap.parse_args()
 
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")

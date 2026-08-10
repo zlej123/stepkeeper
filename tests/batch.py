@@ -75,7 +75,7 @@ def main():
     ap.add_argument("--analyze", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--capture", action="store_true")
-    ap.add_argument("--model", default="gemini-flash-lite-latest")
+    ap.add_argument("--model", default="gemini-3.5-flash-lite")
     args = ap.parse_args()
 
     fixtures = json.loads((HERE / "fixtures" / "urls.json").read_text(encoding="utf-8"))

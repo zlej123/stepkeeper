@@ -143,7 +143,7 @@ python tests/batch.py --domain en_output --analyze   # English document-language
 ## Limits
 
 - Public videos only; under 30 minutes recommended.
-- Free-tier Gemini rate-limits under batch load. Default model is `gemini-flash-lite-latest`.
+- Free-tier Gemini rate-limits under batch load. Default model is `gemini-3.5-flash-lite`.
 - Timestamps are accurate to about ±2–3 s; the before/center/after candidates cover the gap.
 - Not useful for videos with nothing visual to show (lectures, vlogs, reviews).
 
