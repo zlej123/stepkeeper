@@ -71,6 +71,12 @@ that two runs surface *different* ambiguous moments, so the union is denser than
 4.0 guides per video, measured over ten videos. Near-duplicates are merged. Use it when a long video
 comes back with a thin document; it costs one extra analysis call per pass.
 
+By default the capture stage does not trust the analysis timestamp blindly: for every guide it
+scans the step's whole time range (frames extracted locally, one cheap vision call) and anchors the
+three candidates where the target is actually visible. If the scan finds nothing or fails, it falls
+back to the old fixed window around the analysis timestamp — search can only match or beat the
+baseline. Disable with `--no-search` (capture then needs no API key, as before).
+
 Frames are captured from a 480p download. Screen recordings are pulled at 1080p instead — their
 information lives in small UI text that 480p destroys, and static screen content compresses well
 enough that the bigger file costs little. Override either with `STEPKEEPER_CAPTURE_HEIGHT`.
