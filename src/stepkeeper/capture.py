@@ -230,6 +230,29 @@ def search_center(mp4: Path, guide: dict, step: dict, duration: int,
             return "error"
 
 
+# 탐색이 앵커를 옮길 때 분석 지점을 후보에서 버리지 않는다. A/B 실측(달라진 38쌍):
+# 탐색 단독은 8승 9패로 무승부였고, 패배 5건은 "분석 지점이 원래 정확했는데 탐색이
+# 몇 초 옆으로 밀어 좋은 순간이 창 밖으로 나간" 회귀였다. 분석 지점을 한 슬롯으로
+# 남기면 탐색이 옳을 때의 이득은 유지하고 빗나갈 때는 하류 선택이 복구한다. 비용 0.
+HYBRID_KEEP_THRESHOLD = 2      # 이동이 이하면 두 앵커가 사실상 같다 — 일반 창 사용
+
+
+def hybrid_candidates(guide: dict, step: dict, search_t: int, duration: int) -> dict:
+    center = guide["best_visual_timestamp"]
+    if abs(search_t - center) <= HYBRID_KEEP_THRESHOLD:
+        anchored = dict(guide, best_visual_timestamp=search_t)
+        return candidate_times(step, anchored, duration)
+    last = max(0, duration - 1)
+    trio = sorted({max(0, min(last, timestamp))
+                   for timestamp in (center, search_t, search_t + 1)})
+    while len(trio) < 3:                       # 클램프로 겹치면 한 칸씩 보강
+        extend = trio[-1] + 1 if trio[-1] + 1 <= last else max(0, trio[0] - 1)
+        if extend in trio:
+            break
+        trio = sorted(trio + [extend])
+    return dict(zip(SLOTS, trio[:3]))
+
+
 def sync_candidate_meta(out: Path, times: dict) -> bool:
     """candidates.json에 후보별 타임스탬프를 기록하고, 달라졌으면 선택을 무효화한다.
 
@@ -427,8 +450,8 @@ def main():
                 print("Gemini 한도 도달:", str(error)[-200:])
                 sys.exit(75)
             if isinstance(found, float):
-                anchored = dict(guide, best_visual_timestamp=int(round(found)))
-                times[guide["id"]] = candidate_times(step, anchored, duration)
+                times[guide["id"]] = hybrid_candidates(
+                    guide, step, int(round(found)), duration)
                 continue
             # none이든 호출 실패든 고정 창으로 폴백한다. 탐색의 none을 그대로 믿고
             # 링크로 보내면 안 된다 — 실측: 걸쭉한 면이 476초에 뚜렷한데 같은 48장
