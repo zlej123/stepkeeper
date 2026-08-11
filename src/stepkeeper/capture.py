@@ -136,6 +136,100 @@ def candidate_times(step: dict, guide: dict, duration: int):
     return dict(zip(SLOTS, (before, center, after)))
 
 
+# ── 적응 후보 탐색 ────────────────────────────────────────────────────────────
+# 분석이 찍은 center ±1~2초의 고정 창은 분석 타임스탬프가 빗나가면 복구가 불가능하다.
+# 최난도 12건 실측: step 전체를 거칠게 훑고 최적 지점을 재탐색하니 확신 오판 4건이
+# 전부 해소됐다(진짜 프레임 3 + 자연 none 1), none 6건은 전부 옳았다. 프롬프트
+# 수정 4연속 실패 후, 모델을 설득하는 대신 후보 생성 구조를 바꾼 것이 통했다.
+SEARCH_SCHEMA = {
+    "type": "object",
+    "required": ["found"],
+    "properties": {"found": {"type": "boolean"}, "t": {"type": "number"},
+                   "why": {"type": "string"}},
+}
+SEARCH_PROMPT = """아래는 한 단계 구간에서 뽑은 프레임들이며 각 프레임 앞에 시각(초)이 붙어 있습니다.
+'보여야 할 것'이 실제로 알아볼 수 있게 보이는 프레임이 있으면 found=true와 그 시각 t를,
+없으면 found=false를 답하세요. 억지로 고르지 않습니다. JSON만 출력합니다."""
+
+SEARCH_COARSE_LIMIT = 48       # 한 요청에 담는 최대 프레임 수 (토큰 상한)
+SEARCH_WIDTH = 640             # 탐색용 프레임 폭 — 판정에는 충분하고 토큰은 절반
+
+
+def search_window(step: dict, guide: dict, duration: int) -> tuple:
+    """탐색 범위 — step 경계, 시간이 없으면 center ±30초."""
+    center = guide["best_visual_timestamp"]
+    start, end = step.get("t_start"), step.get("t_end")
+    if start is None or end is None or end <= start:
+        start, end = center - 30, center + 30
+    return max(0, start), min(max(0, duration - 1), end)
+
+
+def _extract_frame(mp4: Path, timestamp: float, out: Path, width: int = 0) -> bool:
+    scale = ["-vf", f"scale={width}:-2"] if width else []
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-ss", str(round(timestamp, 2)),
+         "-i", str(mp4), "-frames:v", "1", "-q:v", "3", *scale, str(out)],
+        capture_output=True, text=True)
+    return result.returncode == 0 and out.exists()
+
+
+def search_center(mp4: Path, guide: dict, step: dict, duration: int,
+                  model: str, key: str):
+    """step 구간을 탐색해 '보여야 할 것'이 보이는 시각을 찾는다.
+
+    반환: 시각(float) — 찾았을 때 / None — 구간에 없다고 판정(자연 none) /
+    "error" — 호출 실패(호출자는 고정 창으로 폴백한다).
+    """
+    import base64
+    import tempfile
+
+    from .analyze import RateLimitError, generate_json
+
+    start, end = search_window(step, guide, duration)
+    span = max(1.0, end - start)
+    interval = max(1.0, span / SEARCH_COARSE_LIMIT)
+
+    def ask(frames):
+        parts = [{"text": SEARCH_PROMPT},
+                 {"text": f"보여야 할 것: {guide.get('what_to_show', '')}"}]
+        for timestamp, path in frames:
+            parts.append({"text": f"t={timestamp:.1f}s:"})
+            parts.append({"inline_data": {
+                "mime_type": "image/jpeg",
+                "data": base64.b64encode(path.read_bytes()).decode()}})
+        return generate_json(parts, model, key, SEARCH_SCHEMA)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        coarse = []
+        timestamp = float(start)
+        while timestamp <= end:
+            frame = Path(tmp) / f"c{timestamp:.2f}.jpg"
+            if _extract_frame(mp4, timestamp, frame, SEARCH_WIDTH):
+                coarse.append((timestamp, frame))
+            timestamp += interval
+        if not coarse:
+            return "error"
+        try:
+            got = ask(coarse)
+            if not got.get("found"):
+                return None
+            best = float(got["t"])
+            fine = []
+            for delta in (-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0):
+                frame = Path(tmp) / f"f{delta:+.2f}.jpg"
+                if _extract_frame(mp4, max(0.0, best + delta), frame, SEARCH_WIDTH):
+                    fine.append((best + delta, frame))
+            if fine:
+                refined = ask(fine)
+                if refined.get("found"):
+                    best = float(refined["t"])
+            return max(0.0, best)
+        except RateLimitError:
+            raise
+        except Exception:
+            return "error"
+
+
 def sync_candidate_meta(out: Path, times: dict) -> bool:
     """candidates.json에 후보별 타임스탬프를 기록하고, 달라졌으면 선택을 무효화한다.
 
@@ -184,8 +278,19 @@ def build_picker(vid: str, profile: str, language: str) -> Path:
     guide_ids = []
     for guide in guides:
         guide_id = guide["id"]
-        guide_ids.append(guide_id)
         step = steps.get(guide["step_id"], {})
+        # 적응 탐색이 "구간에 없음"으로 판정한 가이드는 프레임이 없다 — 고를 것도,
+        # 평가할 것도 없으므로 안내만 표시한다 (문서에는 링크가 들어간다).
+        if not (out / f"{guide_id}_center.jpg").exists():
+            rows.append(
+                f'<section data-guide="{html.escape(guide_id)}">'
+                f'<h2>{html.escape(guide_id)} · 단계 {guide["step_id"]}: '
+                f'{html.escape(step.get("summary", ""))}</h2>'
+                f'<p><b>표시:</b> {html.escape(guide.get("phrase", ""))}</p>'
+                f'<p class="none-note">탐색 결과 이 구간에 해당 장면이 없습니다 — '
+                f'문서에는 타임스탬프 링크가 들어갑니다.</p></section>')
+            continue
+        guide_ids.append(guide_id)
         times = candidate_times(step, guide, data.get("_duration", 0))
         preset = ai_picks.get(guide_id)
         cells = "".join(
@@ -279,6 +384,9 @@ def main():
     ap.add_argument("video_id")
     ap.add_argument("--profile", default="generic")
     ap.add_argument("--language", default="ko")
+    ap.add_argument("--model", default="gemini-3.5-flash-lite")
+    ap.add_argument("--no-search", action="store_true",
+                    help="적응 탐색 없이 분석 타임스탬프 ±1~2초 고정 창만 사용")
     args = ap.parse_args()
 
     vid = args.video_id
@@ -301,18 +409,47 @@ def main():
     steps = {step["id"]: step for step in data.get("steps", [])}
     guides = [guide for guide in data.get("visual_guides", [])
               if guide.get("best_visual_timestamp") is not None]
-    times = {guide["id"]: candidate_times(
-                 steps.get(guide["step_id"], {}), guide, data.get("_duration", 0))
-             for guide in guides}
+    duration = data.get("_duration", 0)
+
+    # 기본 탐색: 분석 타임스탬프를 믿지 않고 step 구간에서 실제로 보이는 시각을 찾는다.
+    # 키가 없거나 --no-search면 종전의 고정 창을 쓴다 (오프라인 동작 보존).
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    searching = bool(key) and not args.no_search
+    times = {}
+    searched_none = []
+    from .analyze import RateLimitError
+    for guide in guides:
+        step = steps.get(guide["step_id"], {})
+        if searching:
+            try:
+                found = search_center(mp4, guide, step, duration, args.model, key)
+            except RateLimitError as error:
+                print("Gemini 한도 도달:", str(error)[-200:])
+                sys.exit(75)
+            if isinstance(found, float):
+                anchored = dict(guide, best_visual_timestamp=int(round(found)))
+                times[guide["id"]] = candidate_times(step, anchored, duration)
+                continue
+            # none이든 호출 실패든 고정 창으로 폴백한다. 탐색의 none을 그대로 믿고
+            # 링크로 보내면 안 된다 — 실측: 걸쭉한 면이 476초에 뚜렷한데 같은 48장
+            # 재실행에서 none↔발견이 갈렸다(비결정성). 폴백이면 거짓 none은 "옛
+            # 동작"이 될 뿐이고, 진짜 없는 경우는 하류 autopick이 기권한다.
+            if found is None:
+                searched_none.append(guide["id"])
+                print(f"  {guide['id']}: 탐색이 장면을 못 찾음 — 고정 창으로 폴백")
+            else:
+                print(f"  {guide['id']}: 탐색 호출 실패 — 고정 창으로 폴백")
+        times[guide["id"]] = candidate_times(step, guide, duration)
+
     if sync_candidate_meta(out, times):
         print("후보 타임스탬프가 달라져 기존 선택(picks)을 무효화했습니다 — 다시 선택하세요.")
 
-    print(f"[2/3] 시각 가이드 {len(guides)}개 x {len(SLOTS)}장 프레임 추출...")
-    for guide in guides:
-        for slot, timestamp in times[guide["id"]].items():
+    print(f"[2/3] 시각 가이드 {len(times)}개 x {len(SLOTS)}장 프레임 추출...")
+    for guide_id, slots in times.items():
+        for slot, timestamp in slots.items():
             sh("ffmpeg", "-y", "-loglevel", "error", "-ss", str(timestamp),
                "-i", str(mp4), "-frames:v", "1", "-q:v", "3",
-               "-strict", "unofficial", str(out / f"{guide['id']}_{slot}.jpg"))
+               "-strict", "unofficial", str(out / f"{guide_id}_{slot}.jpg"))
 
     print("[3/3] picker.html 생성...")
     picker = build_picker(vid, args.profile, args.language)

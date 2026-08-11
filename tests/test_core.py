@@ -1049,3 +1049,90 @@ class JunkFilterTests(unittest.TestCase):
         self.assertEqual(["잘게 다진 마늘"], [g["phrase"] for g in kept])
         self.assertEqual(2, len(dropped))
         self.assertIn("50 grams", dropped[0])
+
+
+class AdaptiveSearchTests(unittest.TestCase):
+    """기본 탐색: 분석 타임스탬프 대신 step 구간에서 실제로 보이는 시각을 찾는다.
+    최난도 12건 실측 — 확신 오판 4건 전부 해소, none 6건 전부 옳음 (2026-08-10)."""
+
+    GUIDE = {"id": "vg-1", "best_visual_timestamp": 20, "type": "state",
+             "what_to_show": "무언가"}
+
+    def test_search_window_uses_step_bounds(self):
+        self.assertEqual((10, 50), capture.search_window(
+            {"t_start": 10, "t_end": 50}, self.GUIDE, 100))
+
+    def test_search_window_falls_back_around_center(self):
+        # step 시간이 없으면 center ±30초 — 0과 영상 끝으로 클램프
+        self.assertEqual((0, 50), capture.search_window({}, self.GUIDE, 51))
+        far = dict(self.GUIDE, best_visual_timestamp=90)
+        self.assertEqual((60, 99), capture.search_window({}, far, 100))
+
+    def _fake_extract(self, mp4, timestamp, out, width=0):
+        Path(out).write_bytes(b"\xff\xd8fake")
+        return True
+
+    def test_found_timestamp_is_refined_and_returned(self):
+        calls = []
+
+        def fake_generate(parts, model, key, schema):
+            calls.append(len([p for p in parts if "inline_data" in p]))
+            return {"found": True, "t": 33.0}
+
+        with patch.object(capture, "_extract_frame", self._fake_extract), \
+             patch("stepkeeper.analyze.generate_json", side_effect=fake_generate):
+            got = capture.search_center(
+                Path("x.mp4"), self.GUIDE, {"t_start": 10, "t_end": 50}, 100, "m", "k")
+        self.assertEqual(33.0, got)
+        self.assertEqual(2, len(calls))            # 거친 탐색 + 미세 탐색
+        self.assertGreater(calls[0], calls[1] - 1)  # 거친 쪽이 더 많은 프레임
+
+    def test_not_found_returns_none(self):
+        with patch.object(capture, "_extract_frame", self._fake_extract), \
+             patch("stepkeeper.analyze.generate_json",
+                   return_value={"found": False}):
+            got = capture.search_center(
+                Path("x.mp4"), self.GUIDE, {"t_start": 10, "t_end": 50}, 100, "m", "k")
+        self.assertIsNone(got)
+
+    def test_call_failure_degrades_to_error(self):
+        # 탐색이 죽어도 캡처는 죽으면 안 된다 — 호출자가 고정 창으로 폴백한다
+        with patch.object(capture, "_extract_frame", self._fake_extract), \
+             patch("stepkeeper.analyze.generate_json",
+                   side_effect=RuntimeError("Gemini HTTP 500")):
+            got = capture.search_center(
+                Path("x.mp4"), self.GUIDE, {"t_start": 10, "t_end": 50}, 100, "m", "k")
+        self.assertEqual("error", got)
+
+    def test_rate_limit_propagates(self):
+        # 한도는 폴백하지 않고 위로 올린다 — 파이프라인이 75로 멈추고 재개하게
+        with patch.object(capture, "_extract_frame", self._fake_extract), \
+             patch("stepkeeper.analyze.generate_json",
+                   side_effect=analyze.RateLimitError("quota")):
+            with self.assertRaises(analyze.RateLimitError):
+                capture.search_center(
+                    Path("x.mp4"), self.GUIDE, {"t_start": 10, "t_end": 50}, 100, "m", "k")
+
+    def test_picker_shows_note_for_frameless_guides(self):
+        # 탐색이 none으로 판정한 가이드: 프레임이 없어도 picker가 깨지지 않고
+        # 안내를 보여주며, 평가 대상(guide_ids)에서 빠진다
+        with tempfile.TemporaryDirectory() as temp:
+            os.environ["STEPKEEPER_DATA"] = temp
+            try:
+                data = CoreContractTests().valid_data()
+                second = dict(data["visual_guides"][0], id="vg-2", phrase="프레임 있는 가이드")
+                data["visual_guides"].append(second)
+                source = analysis_file(Path(temp), "vid00000000", "generic", "ko")
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                frames = frames_dir(Path(temp), "vid00000000", "generic", "ko")
+                frames.mkdir(parents=True, exist_ok=True)
+                for slot in capture.SLOTS:                      # vg-2만 프레임 존재
+                    (frames / f"vg-2_{slot}.jpg").write_bytes(b"\xff\xd8")
+                picker = capture.build_picker("vid00000000", "generic", "ko")
+                page = picker.read_text(encoding="utf-8")
+                self.assertIn("링크가 들어갑니다", page)
+                self.assertNotIn("vg-1_center.jpg", page)
+                self.assertIn('"guide_ids": ["vg-2"]', page)
+            finally:
+                os.environ.pop("STEPKEEPER_DATA", None)
