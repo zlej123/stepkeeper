@@ -1136,3 +1136,31 @@ class AdaptiveSearchTests(unittest.TestCase):
                 self.assertIn('"guide_ids": ["vg-2"]', page)
             finally:
                 os.environ.pop("STEPKEEPER_DATA", None)
+
+
+class HybridCandidateTests(unittest.TestCase):
+    """탐색이 앵커를 옮겨도 분석 지점을 버리지 않는다. A/B 실측: 탐색 단독은 8승 9패
+    무승부였고 패배 5건은 원래 정확했던 분석 지점을 탐색이 몇 초 밀어낸 회귀였다."""
+
+    GUIDE = {"id": "vg-1", "best_visual_timestamp": 117, "type": "action"}
+    STEP = {"t_start": 100, "t_end": 140}
+
+    def test_moved_anchor_keeps_the_analysis_point_as_a_candidate(self):
+        # 실측 회귀 사례: 분석 117초(정확) → 탐색 111초 이동 → 좋은 순간이 창 밖
+        slots = capture.hybrid_candidates(self.GUIDE, self.STEP, 111, 1000)
+        self.assertEqual({111, 112, 117}, set(slots.values()))
+
+    def test_small_move_uses_the_normal_window(self):
+        # ±2초 이내면 두 앵커가 사실상 같다 — 일반 창(±1, action)으로
+        slots = capture.hybrid_candidates(self.GUIDE, self.STEP, 118, 1000)
+        self.assertEqual({117, 118, 119}, set(slots.values()))
+
+    def test_clamped_duplicates_are_backfilled(self):
+        guide = dict(self.GUIDE, best_visual_timestamp=0)
+        slots = capture.hybrid_candidates(guide, {}, 1, 3)    # duration 3 → last=2
+        self.assertEqual(3, len(set(slots.values())))
+
+    def test_slots_are_chronological(self):
+        slots = capture.hybrid_candidates(self.GUIDE, self.STEP, 130, 1000)
+        values = list(slots.values())
+        self.assertEqual(sorted(values), values)
