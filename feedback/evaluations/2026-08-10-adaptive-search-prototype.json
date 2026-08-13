@@ -1,32 +1,38 @@
 {
- "evaluation_id": "2026-08-10-adaptive-search-prototype",
- "review_kind": "prototype_ab",
- "idea": "External review proposal: replace fixed candidate windows (center ±1/±2s) with a step-wide search — coarse pass at 1-3s intervals over the whole step (frames extracted locally from the cached video, labelled with timestamps, sent in one request), then a fine pass at 4fps around the best hit. If the search finds nothing, none falls out naturally.",
- "test_set": "The 12 hardest guides from the 235-guide holdout: every guide where all three fixed-window candidates were unusable (Claude-graded). Includes all 4 confident-wrong-pick failures that three abstention attempts failed to fix.",
- "results": {
-  "search_found_frame": 6,
-  "search_said_none": 6,
-  "found_breakdown": {
-   "genuinely_usable": [
-    "#11 putty knife close-up @275s",
-    "#22 supine butterfly @34s",
-    "#50 flattened clay @76s"
-   ],
-   "borderline": [
-    "#110 clip selected + cursor, drag not yet in motion"
-   ],
-   "false_finds": [
-    "#92 elbow crease (full-body long shot; the model's own rationale said 'not observed' yet returned found=true)",
-    "#111 irrelevant app screen"
-   ]
+  "evaluation_id": "2026-08-10-adaptive-search-prototype",
+  "review_kind": "prototype_ab",
+  "idea": "External review proposal: replace fixed candidate windows (center ±1/±2s) with a step-wide search — coarse pass at 1-3s intervals over the whole step (frames extracted locally from the cached video, labelled with timestamps, sent in one request), then a fine pass at 4fps around the best hit. If the search finds nothing, none falls out naturally.",
+  "test_set": "The 12 hardest guides from the 235-guide holdout: every guide where all three fixed-window candidates were unusable (Claude-graded). Includes all 4 confident-wrong-pick failures that three abstention attempts failed to fix.",
+  "results": {
+    "search_found_frame": 6,
+    "search_said_none": 6,
+    "found_breakdown": {
+      "genuinely_usable": [
+        "#11 putty knife close-up @275s",
+        "#22 supine butterfly @34s",
+        "#50 flattened clay @76s"
+      ],
+      "borderline": [
+        "#110 clip selected + cursor, drag not yet in motion"
+      ],
+      "false_finds": [
+        "#92 elbow crease (full-body long shot; the model's own rationale said 'not observed' yet returned found=true)",
+        "#111 irrelevant app screen"
+      ]
+    },
+    "all_6_nones_correct": true,
+    "with_existing_verify_pass": "Verify rejects #111 but passes #92 (the known long-shot blind spot). Net wrong photos on these 12: fixed windows 4 → adaptive 1 (+1 borderline). All 4 confident-pick failures resolved: 3 with genuine frames, #60 now a natural none."
   },
-  "all_6_nones_correct": true,
-  "with_existing_verify_pass": "Verify rejects #111 but passes #92 (the known long-shot blind spot). Net wrong photos on these 12: fixed windows 4 → adaptive 1 (+1 borderline). All 4 confident-pick failures resolved: 3 with genuine frames, #60 now a natural none."
- },
- "cost": {
-  "coarse_frames_per_guide": "14-96 (avg ~42, 640px)",
-  "calls_per_guide": "2 (coarse+fine) + existing verify",
-  "note": "Request count is similar to today's pick+verify; the cost driver is tokens (~15x the selection stage). On request-limited free tier this is affordable; for token-billed keys it is the main tradeoff."
- },
- "open_design_question": "When to search. Escalating only when the cheap path answers none will NOT fix the confident-wrong picks (they never say none). Fixing those requires search as the primary candidate generator, which is the cost above and a 3-repo contract change (picker UI, candidate count, parity goldens). Decision deferred to the owner."
+  "cost": {
+    "coarse_frames_per_guide": "14-96 (avg ~42, 640px)",
+    "calls_per_guide": "2 (coarse+fine) + existing verify",
+    "note": "Request count is similar to today's pick+verify; the cost driver is tokens (~15x the selection stage). On request-limited free tier this is affordable; for token-billed keys it is the main tradeoff."
+  },
+  "open_design_question": "When to search. Escalating only when the cheap path answers none will NOT fix the confident-wrong picks (they never say none). Fixing those requires search as the primary candidate generator, which is the cost above and a 3-repo contract change (picker UI, candidate count, parity goldens). Decision deferred to the owner.",
+  "_correction_2026_08_13": {
+    "status": "이 파일의 핵심 수치는 근거로 쓸 수 없다",
+    "why": "12건은 '고정 창 후보 3장이 전부 못 쓰는 케이스'로 선정됐다. 따라서 '고정 창 4건 오답'은 측정값이 아니라 선정 기준을 다시 말한 것이고, 반사실이 없다. 235건 홀드아웃이라는 분모가 생략됐으며(고정 창 실제 오답률 약 2%), 적응 탐색이 나머지 223건에서 새 오류를 냈는지는 재지 않았다.",
+    "also": "'all_6_nones_correct: true'는 검증 절차 기록이 없다. 같은 질문을 정직하게 잰 95건 A/B에서는 탐색이 사진 5건을 잃고 4건을 얻어 부호가 반대였다.",
+    "see": "feedback/evaluations/2026-08-13-adaptive-search-ab-inconclusive.json"
+  }
 }

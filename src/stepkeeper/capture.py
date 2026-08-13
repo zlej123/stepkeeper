@@ -13,6 +13,7 @@ per guide — that file doubles as the auto-pick feedback record.
 import argparse
 import html
 import json
+import math
 import os
 import subprocess
 import sys
@@ -115,7 +116,10 @@ def candidate_times(step: dict, guide: dict, duration: int):
     ±4초 후보가 결과·준비·다음 동작으로 갈라져 같은 가이드의 비교가 아니게 된 문제를 막는다.
     """
     center = guide["best_visual_timestamp"]
-    last = max(0, duration - 1)
+    # duration을 모르면(0) 상한을 강제하지 않는다. 예전에는 last=0이 되어 after가 0으로
+    # 접히면서 {before:116, center:117, after:0} 같은 역전이 나왔다 — 세 후보 중 한 장이
+    # 영상 첫 프레임이 되고, picker에서 그게 정답처럼 보인다.
+    last = max(0, duration - 1) if duration else center + DEFAULT_CANDIDATE_SPREAD
     limit = (ACTION_CANDIDATE_SPREAD if guide.get("type") == "action"
              else DEFAULT_CANDIDATE_SPREAD)
     if step:
@@ -153,6 +157,7 @@ SEARCH_PROMPT = """아래는 한 단계 구간에서 뽑은 프레임들이며 �
 
 SEARCH_COARSE_LIMIT = 48       # 한 요청에 담는 최대 프레임 수 (토큰 상한)
 SEARCH_WIDTH = 640             # 탐색용 프레임 폭 — 판정에는 충분하고 토큰은 절반
+SEARCH_MODEL = "gemini-3.5-flash-lite"   # 탐색 전용 — --model과 쿼터를 분리한다
 
 
 def search_window(step: dict, guide: dict, duration: int) -> tuple:
@@ -214,15 +219,27 @@ def search_center(mp4: Path, guide: dict, step: dict, duration: int,
             if not got.get("found"):
                 return None
             best = float(got["t"])
+            # 모델이 창 밖이나 비정상 값을 줄 수 있다 (실측: 100~140초 창에 t=900,
+            # t=1e12는 조용히 마지막 프레임으로 클램프, t=inf는 OverflowError).
+            # 요청한 구간을 벗어나면 "못 찾음"으로 취급해 고정 창으로 폴백한다.
+            if not math.isfinite(best) or not (start <= best <= end):
+                return None
             fine = []
             for delta in (-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0):
                 frame = Path(tmp) / f"f{delta:+.2f}.jpg"
                 if _extract_frame(mp4, max(0.0, best + delta), frame, SEARCH_WIDTH):
                     fine.append((best + delta, frame))
             if fine:
-                refined = ask(fine)
+                try:
+                    refined = ask(fine)
+                except RateLimitError:
+                    raise
+                except Exception:
+                    return best        # 거친 탐색은 성공했고 이미 값을 치렀다
                 if refined.get("found"):
-                    best = float(refined["t"])
+                    candidate = float(refined["t"])
+                    if math.isfinite(candidate) and start <= candidate <= end:
+                        best = candidate
             return max(0.0, best)
         except RateLimitError:
             raise
@@ -242,38 +259,70 @@ def hybrid_candidates(guide: dict, step: dict, search_t: int, duration: int) -> 
     if abs(search_t - center) <= HYBRID_KEEP_THRESHOLD:
         anchored = dict(guide, best_visual_timestamp=search_t)
         return candidate_times(step, anchored, duration)
-    last = max(0, duration - 1)
+    # duration이 없으면(0) 마지막 프레임을 0으로 보고 후보가 붕괴한다 — 아는 시각들로
+    # 상한을 추정한다. 짧은 영상에서 후보가 겹치면 같은 프레임을 반복해서라도 3장을
+    # 채운다: 슬롯이 비면 autopick이 그 가이드를 통째로 건너뛴다 (autopick.py의 3장 계약).
+    last = max(0, duration - 1) if duration else max(center, search_t) + 1
     trio = sorted({max(0, min(last, timestamp))
                    for timestamp in (center, search_t, search_t + 1)})
-    while len(trio) < 3:                       # 클램프로 겹치면 한 칸씩 보강
-        extend = trio[-1] + 1 if trio[-1] + 1 <= last else max(0, trio[0] - 1)
-        if extend in trio:
-            break
-        trio = sorted(trio + [extend])
+    while len(trio) < 3:
+        # 바깥으로 못 넓히면 사이를 메운다 (예: last=5에 {0,5}면 1을 넣는다).
+        for extend in (trio[-1] + 1, trio[0] - 1, *range(trio[0], trio[-1] + 1)):
+            if 0 <= extend <= last and extend not in trio:
+                trio = sorted(trio + [extend])
+                break
+        else:
+            trio.append(trio[-1])              # 더 넓힐 수 없으면 마지막 프레임 반복
     return dict(zip(SLOTS, trio[:3]))
 
 
 def sync_candidate_meta(out: Path, times: dict) -> bool:
-    """candidates.json에 후보별 타임스탬프를 기록하고, 달라졌으면 선택을 무효화한다.
+    """candidates.json에 후보별 타임스탬프를 기록하고, 달라진 가이드의 선택만 버린다.
 
     창 규칙이나 분석이 바뀌면 같은 "vg-1_center.jpg" 파일명이 전혀 다른 장면을
     가리키게 된다 — 원인이 무엇이든 결국 타임스탬프 변화로 나타나므로, 이 파일
-    하나와 비교해 어긋나면 picks.json/picks-meta.json을 지운다.
-    반환값: 기존 선택을 무효화했으면 True.
+    하나와 비교해 어긋난 가이드의 선택을 버린다.
+
+    **가이드 단위로만 버린다.** 예전에는 하나라도 달라지면 picks.json 전체를 지웠는데,
+    탐색이 기본이 되면서 앵커가 1초만 흔들려도 재실행마다 사람이 고른 것이 전부
+    날아갔다. 고정 창 시절 재캡처가 멱등이었던 성질(README의 --picks 워크플로가
+    의존한다)이 깨진 것이다. 버리는 선택은 picks.superseded.json에 남겨 복구할 수 있게 한다.
+    반환값: 버린 가이드 수.
     """
     meta = out / "candidates.json"
     previous = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else None
     meta.write_text(json.dumps(times, ensure_ascii=False, indent=2), encoding="utf-8")
-    # 기록이 없으면(candidates.json 도입 전 데이터) 선택이 지금 후보와 맞는지 검증할
-    # 방법이 없다 — 맞다고 가정하지 않고 무효화한다 (fail-closed).
     if previous == times:
-        return False
-    invalidated = False
-    for stale in (out / "picks.json", out / "picks-meta.json"):
-        if stale.exists():
-            stale.unlink()
-            invalidated = True
-    return invalidated
+        return 0
+
+    def stale_guide(guide_id: str) -> bool:
+        # 기록이 없으면(candidates.json 도입 전 데이터) 선택이 지금 후보와 맞는지 검증할
+        # 방법이 없다 — 맞다고 가정하지 않고 버린다 (fail-closed).
+        if previous is None:
+            return True
+        return previous.get(guide_id) != times.get(guide_id)
+
+    dropped = {}
+    for name in ("picks.json", "picks-meta.json"):
+        path = out / name
+        if not path.exists():
+            continue
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        picks = saved.get("picks") if isinstance(saved.get("picks"), dict) else saved
+        if not isinstance(picks, dict):
+            continue
+        stale = {gid: pick for gid, pick in picks.items() if stale_guide(gid)}
+        if not stale:
+            continue
+        dropped.update(stale)
+        for gid in stale:
+            picks.pop(gid)
+        path.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if dropped:
+        (out / "picks.superseded.json").write_text(
+            json.dumps(dropped, ensure_ascii=False, indent=2), encoding="utf-8")
+    return len(dropped)
 
 
 def build_picker(vid: str, profile: str, language: str) -> Path:
@@ -296,6 +345,9 @@ def build_picker(vid: str, profile: str, language: str) -> Path:
     steps = {step["id"]: step for step in data.get("steps", [])}
     guides = [guide for guide in data.get("visual_guides", [])
               if guide.get("best_visual_timestamp") is not None]
+    meta = out / "candidates.json"
+    recorded_times = (json.loads(meta.read_text(encoding="utf-8"))
+                      if meta.exists() else {})
 
     rows = []
     guide_ids = []
@@ -314,7 +366,11 @@ def build_picker(vid: str, profile: str, language: str) -> Path:
                 f'문서에는 타임스탬프 링크가 들어갑니다.</p></section>')
             continue
         guide_ids.append(guide_id)
-        times = candidate_times(step, guide, data.get("_duration", 0))
+        # 실제로 추출한 시각은 candidates.json이 정본이다 — 탐색이 앵커를 옮긴 가이드는
+        # 여기서 고정 창을 다시 계산하면 라벨이 실제 프레임과 어긋난다 (실측: 111초
+        # 프레임에 1:56 라벨). 사람이 잘못된 시각을 믿고 고르면 평가 기록까지 오염된다.
+        times = recorded_times.get(guide_id) or candidate_times(
+            step, guide, data.get("_duration", 0))
         preset = ai_picks.get(guide_id)
         cells = "".join(
             f'<label class="cell"><input type="radio" name="{guide_id}" value="{slot}"'
@@ -445,7 +501,10 @@ def main():
         step = steps.get(guide["step_id"], {})
         if searching:
             try:
-                found = search_center(mp4, guide, step, duration, args.model, key)
+                # 탐색은 --model을 상속하지 않는다: 가이드마다 프레임 48장을 보내므로
+                # 강한 모델을 지정하면 그 모델의 하루 쿼터(실측: flash 20회)를 캡처가
+                # 다 태워 정작 분석이 못 돈다. 프레임 위치 찾기에는 경량 모델로 충분하다.
+                found = search_center(mp4, guide, step, duration, SEARCH_MODEL, key)
             except RateLimitError as error:
                 print("Gemini 한도 도달:", str(error)[-200:])
                 sys.exit(75)
@@ -464,8 +523,10 @@ def main():
                 print(f"  {guide['id']}: 탐색 호출 실패 — 고정 창으로 폴백")
         times[guide["id"]] = candidate_times(step, guide, duration)
 
-    if sync_candidate_meta(out, times):
-        print("후보 타임스탬프가 달라져 기존 선택(picks)을 무효화했습니다 — 다시 선택하세요.")
+    dropped = sync_candidate_meta(out, times)
+    if dropped:
+        print(f"후보 타임스탬프가 달라진 가이드 {dropped}개의 선택을 버렸습니다 "
+              f"— 그 가이드만 다시 선택하세요 (버린 선택: picks.superseded.json).")
 
     print(f"[2/3] 시각 가이드 {len(times)}개 x {len(SLOTS)}장 프레임 추출...")
     for guide_id, slots in times.items():

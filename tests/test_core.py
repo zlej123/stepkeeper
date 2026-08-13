@@ -582,11 +582,27 @@ class CandidateMetaTests(unittest.TestCase):
             (out / "picks.json").write_text('{"vg-1": "center"}', encoding="utf-8")
             (out / "picks-meta.json").write_text('{"reasons": {}}', encoding="utf-8")
             moved = {"vg-1": {"before": 6, "center": 8, "after": 10}}
-            self.assertTrue(capture.sync_candidate_meta(out, moved))
-            self.assertFalse((out / "picks.json").exists())
-            self.assertFalse((out / "picks-meta.json").exists())
+            self.assertEqual(1, capture.sync_candidate_meta(out, moved))
+            self.assertEqual({}, json.loads(
+                (out / "picks.json").read_text(encoding="utf-8")))
+            self.assertEqual({"vg-1": "center"}, json.loads(
+                (out / "picks.superseded.json").read_text(encoding="utf-8")))
             self.assertEqual(moved, json.loads(
                 (out / "candidates.json").read_text(encoding="utf-8")))
+
+    def test_untouched_guides_keep_their_picks(self):
+        """탐색은 비결정적이라 재실행마다 일부 앵커가 흔들린다 — 흔들리지 않은
+        가이드의 사람 선택까지 버리면 --picks 워크플로가 재실행마다 무너진다."""
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            both = dict(self.TIMES, **{"vg-2": {"before": 20, "center": 21, "after": 22}})
+            capture.sync_candidate_meta(out, both)
+            (out / "picks.json").write_text('{"vg-1": "center", "vg-2": "before"}',
+                                            encoding="utf-8")
+            drifted = dict(both, **{"vg-2": {"before": 21, "center": 22, "after": 23}})
+            self.assertEqual(1, capture.sync_candidate_meta(out, drifted))
+            self.assertEqual({"vg-1": "center"}, json.loads(
+                (out / "picks.json").read_text(encoding="utf-8")))
 
     def test_legacy_data_without_meta_fails_closed(self):
         """candidates.json 도입 전 데이터: 선택이 지금 후보와 맞는지 검증할 수 없다
@@ -594,8 +610,9 @@ class CandidateMetaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
             (out / "picks.json").write_text('{"vg-1": "center"}', encoding="utf-8")
-            self.assertTrue(capture.sync_candidate_meta(out, self.TIMES))
-            self.assertFalse((out / "picks.json").exists())
+            self.assertEqual(1, capture.sync_candidate_meta(out, self.TIMES))
+            self.assertEqual({}, json.loads(
+                (out / "picks.json").read_text(encoding="utf-8")))
 
 
 class ExplicitSelectionTests(unittest.TestCase):
@@ -1137,6 +1154,34 @@ class AdaptiveSearchTests(unittest.TestCase):
             finally:
                 os.environ.pop("STEPKEEPER_DATA", None)
 
+    def test_picker_labels_come_from_candidates_json(self):
+        """picker는 실제 추출 시각(candidates.json)을 보여야 한다.
+
+        탐색이 앵커를 옮기면 고정 창을 다시 계산한 라벨은 실제 프레임과 어긋난다
+        (실측: 111초 프레임에 1:56 라벨, 95건 중 34건이 5초 넘게 벌어졌다).
+        사람이 잘못된 시각을 믿고 고르면 그 오해가 평가 기록에까지 남는다.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            os.environ["STEPKEEPER_DATA"] = temp
+            try:
+                data = CoreContractTests().valid_data()
+                source = analysis_file(Path(temp), "vid00000000", "generic", "ko")
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                frames = frames_dir(Path(temp), "vid00000000", "generic", "ko")
+                frames.mkdir(parents=True, exist_ok=True)
+                for slot in capture.SLOTS:
+                    (frames / f"vg-1_{slot}.jpg").write_bytes(b"\xff\xd8")
+                moved = {"vg-1": {"before": 111, "center": 112, "after": 117}}
+                (frames / "candidates.json").write_text(
+                    json.dumps(moved), encoding="utf-8")
+                page = capture.build_picker(
+                    "vid00000000", "generic", "ko").read_text(encoding="utf-8")
+                for timestamp in moved["vg-1"].values():
+                    self.assertIn(hms(timestamp), page, f"{timestamp}s 라벨이 없다")
+            finally:
+                os.environ.pop("STEPKEEPER_DATA", None)
+
 
 class HybridCandidateTests(unittest.TestCase):
     """탐색이 앵커를 옮겨도 분석 지점을 버리지 않는다. A/B 실측: 탐색 단독은 8승 9패
@@ -1156,9 +1201,34 @@ class HybridCandidateTests(unittest.TestCase):
         self.assertEqual({117, 118, 119}, set(slots.values()))
 
     def test_clamped_duplicates_are_backfilled(self):
+        # search_t가 임계값 밖이라 실제로 백필 분기를 탄다 (예전 테스트는 |1-0|<=2라
+        # candidate_times 쪽으로 새서 백필 루프 커버리지가 0이었다).
         guide = dict(self.GUIDE, best_visual_timestamp=0)
-        slots = capture.hybrid_candidates(guide, {}, 1, 3)    # duration 3 → last=2
+        slots = capture.hybrid_candidates(guide, {}, 5, 6)     # duration 6 → last=5
         self.assertEqual(3, len(set(slots.values())))
+
+    def test_short_video_still_yields_three_slots(self):
+        # 슬롯이 비면 autopick이 그 가이드를 통째로 건너뛴다 — 겹쳐서라도 3장을 채운다.
+        # search_t는 임계값 밖으로 둔다: 안쪽이면 candidate_times로 새서 백필을 못 본다.
+        guide = dict(self.GUIDE, best_visual_timestamp=0)
+        for duration in (0, 1, 2, 3):
+            slots = capture.hybrid_candidates(guide, {}, 5, duration)
+            self.assertEqual(list(capture.SLOTS), list(slots), f"duration={duration}")
+
+    def test_fixed_window_missing_duration_stays_chronological(self):
+        # _duration이 없으면 after가 0으로 접혀 영상 첫 프레임이 후보로 들어가던 회귀.
+        slots = capture.candidate_times(
+            {"t_start": 100, "t_end": 140},
+            {"best_visual_timestamp": 117, "type": "state"}, 0)
+        self.assertEqual(sorted(slots.values()), list(slots.values()))
+        self.assertEqual(3, len(set(slots.values())))
+
+    def test_missing_duration_keeps_slots_chronological(self):
+        # _duration이 없으면(0) last=0이 되어 세 후보가 전부 0으로 접히던 회귀.
+        slots = capture.hybrid_candidates(self.GUIDE, self.STEP, 130, 0)
+        self.assertEqual(list(capture.SLOTS), list(slots))
+        self.assertEqual(3, len(set(slots.values())))
+        self.assertEqual(sorted(slots.values()), list(slots.values()))
 
     def test_slots_are_chronological(self):
         slots = capture.hybrid_candidates(self.GUIDE, self.STEP, 130, 1000)
