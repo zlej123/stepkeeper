@@ -1183,6 +1183,27 @@ class AdaptiveSearchTests(unittest.TestCase):
                 os.environ.pop("STEPKEEPER_DATA", None)
 
 
+class SearchDefaultTests(unittest.TestCase):
+    """적응 탐색은 옵트인이다.
+
+    95건 A/B에서 순 +2 (p=0.75, 순수 노이즈의 기대 절댓값 2.52보다 작다)였고 기준선
+    arm이 다른 모델로 돌아 창 전략과 모델 차이를 분리할 수 없었다. 개선은 미입증인데
+    비용은 확정적으로 선택 단계 토큰의 약 19배다 — 기본값이 다시 켜지면 이 테스트가 막는다.
+    """
+
+    def test_search_is_opt_in(self):
+        self.assertFalse(capture.build_parser().parse_args(["vid00000000"]).search)
+
+    def test_search_flag_turns_it_on(self):
+        args = capture.build_parser().parse_args(["vid00000000", "--search"])
+        self.assertTrue(args.search)
+
+    def test_legacy_no_search_still_accepted(self):
+        # 옛 호출(--no-search)이 깨지지 않아야 한다 — 이제는 무의미하지만 에러도 아니다.
+        args = capture.build_parser().parse_args(["vid00000000", "--no-search"])
+        self.assertFalse(args.search)
+
+
 class HybridCandidateTests(unittest.TestCase):
     """탐색이 앵커를 옮겨도 분석 지점을 버리지 않는다. A/B 실측: 탐색 단독은 8승 9패
     무승부였고 패배 5건은 원래 정확했던 분석 지점을 탐색이 몇 초 밀어낸 회귀였다."""

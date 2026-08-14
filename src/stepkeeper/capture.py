@@ -458,15 +458,23 @@ function downloadEvaluation(){{
     return picker
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("video_id")
     ap.add_argument("--profile", default="generic")
     ap.add_argument("--language", default="ko")
     ap.add_argument("--model", default="gemini-3.5-flash-lite")
+    ap.add_argument("--search", action="store_true",
+                    help="적응 탐색: step 구간을 훑어 실제로 보이는 시각에 후보를 맞춘다. "
+                         "선택 단계 토큰이 약 19배 들고, 개선은 아직 입증되지 않았다 "
+                         "(feedback/evaluations/2026-08-13-adaptive-search-ab-inconclusive.json)")
     ap.add_argument("--no-search", action="store_true",
-                    help="적응 탐색 없이 분석 타임스탬프 ±1~2초 고정 창만 사용")
-    args = ap.parse_args()
+                    help=argparse.SUPPRESS)   # 기본이 고정 창이 된 뒤로는 무의미 — 옛 호출 호환용
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     vid = args.video_id
     source = analysis_file(data_root(), vid, args.profile, args.language)
@@ -490,10 +498,13 @@ def main():
               if guide.get("best_visual_timestamp") is not None]
     duration = data.get("_duration", 0)
 
-    # 기본 탐색: 분석 타임스탬프를 믿지 않고 step 구간에서 실제로 보이는 시각을 찾는다.
-    # 키가 없거나 --no-search면 종전의 고정 창을 쓴다 (오프라인 동작 보존).
+    # 기본은 고정 창이다. 적응 탐색(--search)은 step 구간을 훑어 실제로 보이는 시각에
+    # 후보를 맞추지만, 개선이 입증되지 않았다: 95건 A/B에서 순 +2 (p=0.75, 순수 노이즈의
+    # 기대 절댓값 2.52보다 작다), 게다가 기준선 arm이 다른 모델로 돌아 창 전략과 모델
+    # 차이를 분리할 수 없었다. 비용은 확정적으로 선택 단계 토큰의 약 19배다.
+    # 자세한 내용: feedback/evaluations/2026-08-13-adaptive-search-ab-inconclusive.json
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    searching = bool(key) and not args.no_search
+    searching = bool(key) and args.search and not args.no_search
     times = {}
     searched_none = []
     from .analyze import RateLimitError
