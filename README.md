@@ -71,11 +71,19 @@ that two runs surface *different* ambiguous moments, so the union is denser than
 4.0 guides per video, measured over ten videos. Near-duplicates are merged. Use it when a long video
 comes back with a thin document; it costs one extra analysis call per pass.
 
-By default the capture stage does not trust the analysis timestamp blindly: for every guide it
-scans the step's whole time range (frames extracted locally, one cheap vision call) and anchors the
-three candidates where the target is actually visible. If the scan finds nothing or fails, it falls
-back to the old fixed window around the analysis timestamp — search can only match or beat the
-baseline. Disable with `--no-search` (capture then needs no API key, as before).
+Candidates are taken from a fixed window around the analysis timestamp (center ±1–2 s, clamped to
+the step). `--search` instead scans the step's whole time range — frames extracted locally, one
+cheap vision call — and anchors the three candidates where the target is actually visible, keeping
+the analysis timestamp as one of the three. If the scan finds nothing, returns a time outside the
+step, or fails, it falls back to the fixed window.
+
+**`--search` is opt-in because it is not established as an improvement.** A 95-guide A/B measured
+net +2 guides (p = 0.75 — smaller than the average swing a pure-noise rerun produces), and the run
+was confounded: the baseline arm ran on a different model string. An earlier claim here that
+"search can only match or beat the baseline" was false — search alone lost photos on 5 guides while
+gaining on 4. The cost, unlike the benefit, is certain: roughly 19x the selection-stage tokens. See
+`feedback/evaluations/2026-08-13-adaptive-search-ab-inconclusive.json` for the experiment that would
+settle it.
 
 Frames are captured from a 480p download. Screen recordings are pulled at 1080p instead — their
 information lives in small UI text that 480p destroys, and static screen content compresses well
